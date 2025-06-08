@@ -1,20 +1,77 @@
-return function(settings)
-    settings = settings or {}
+--!strict
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local StarterGui = game:GetService("StarterGui")
+local UserSettings = UserSettings()
 
-    local NormalShit = settings.NormalShit or 1
-    local Scale = settings.Scale or 1
-    local Head = settings.Head or 1
-    local Width = settings.Width or 1
-    local Height = settings.Height or 1
-    local Depth = settings.Depth or 1
+local FakeCharacterModule = {}
 
-    local R6_BASE_SIZES = {
-        HEAD = Vector3.new(1, 1, 1),
-        TORSO = Vector3.new(2, 2, 1),
-        ARM = Vector3.new(1, 2, 1),
-        LEG = Vector3.new(1, 2, 1)
-    }
+FakeCharacterModule.Settings = {
+    EnableNotifications = true,
+    ResetKeyCode = Enum.KeyCode.X,
+    FakeCharacterNameSuffix = "_Fake",
+    Transparency = 1,
+    WalkSpeed = 16,
 
+    BodyDepthScale = 1,
+    BodyHeightScale = 1,
+    BodyWidthScale = 1,
+    HeadScale = 1,
+}
+
+local LocalPlayer = Players.LocalPlayer
+local RealCharacter: Model?
+local FakeCharacter: Model?
+local PlatformPart: Part?
+local OriginalCFrame: CFrame
+local IsInvisible: boolean = false
+
+local function RunCustomAnimation(Char: Model)
+    local AnimateScript = Char:WaitForChild("Animate") as LocalScript
+
+    if AnimateScript then
+        AnimateScript.Disabled = true
+    end
+
+    local Humanoid = Char:WaitForChild("Humanoid") as Humanoid
+
+    for _, track in ipairs(Humanoid:GetPlayingAnimationTracks()) do
+        track:Stop()
+    end
+
+    local script = AnimateScript
+    local Character = Char
+    local pose = "Standing"
+
+    local userNoUpdateOnLoopSuccess, userNoUpdateOnLoopValue = pcall(function()
+        return UserSettings():IsUserFeatureEnabled("UserNoUpdateOnLoop")
+    end)
+    local userNoUpdateOnLoop = userNoUpdateOnLoopSuccess and userNoUpdateOnLoopValue
+
+    local AnimationSpeedDampeningObject = script:FindFirstChild("ScaleDampeningPercent")
+    local HumanoidHipHeight = 2
+
+    local humanoidSpeed = 0
+    local cachedRunningSpeed = 0
+    local cachedLocalDirection = { x = 0.0, y = 0.0 }
+    local smallButNotZero = 0.0001
+    local runBlendtime = 0.2
+    local lastLookVector = Vector3.new(0.0, 0.0, 0.0)
+    local lastBlendTime = 0
+    local WALK_SPEED = 6.4
+    local RUN_SPEED = 12.8
+
+    local EMOTE_TRANSITION_TIME = 0.1
+
+    local currentAnim = ""
+    local currentAnimInstance: Animation? = nil
+    local currentAnimTrack: AnimationTrack? = nil
+    local currentAnimKeyframeHandler: RBXScriptConnection? = nil
+    local currentAnimSpeed = 1.0
+
+    local PreloadedAnims: { [string]: boolean } = {}
+
+    local animTable: { [string]: { count: number, totalWeight: number, connections: { RBXScriptConnection }, [number]: { anim: Animation, weight: number } } } = {}
     local animNames = {
         idle = {
             { id = "http://www.roblox.com/asset/?id=12521158637", weight = 9 },
@@ -76,461 +133,331 @@ return function(settings)
         },
     }
 
-    local FakeCharacter = nil
-    local PlatformPart = nil
-    local originalRealCharacter = nil
+    local strafingLocomotionMap: { [string]: { lv: Vector2, speed: number, track: AnimationTrack? } } = {}
+    local fallbackLocomotionMap: { [string]: { lv: Vector2, speed: number, track: AnimationTrack? } } = {}
+    local locomotionMap = strafingLocomotionMap
 
-    local function RunCustomAnimation(Char)
-        local script = Char.Animate
+    local emoteNames: { [string]: boolean } = { wave = false, point = false, dance = true, dance2 = true, dance3 = true, laugh = false, cheer = false }
 
-        if script ~= nil and script:FindFirstChild("Animate") ~= nil then
-            script.Disabled = true
-        end
+    math.randomseed(tick())
 
-        local Humanoid = Char:WaitForChild("Humanoid")
-
-        for i, v in next, Humanoid:GetPlayingAnimationTracks() do
-            v:Stop()
-        end
-
-        local Character = Char
-        local pose = "Standing"
-
-        local UserGameSettings = UserSettings():GetService("UserGameSettings")
-
-        local userNoUpdateOnLoopSuccess, userNoUpdateOnLoopValue = pcall(function()
-            return UserSettings():IsUserFeatureEnabled("UserNoUpdateOnLoop")
-        end)
-        local userNoUpdateOnLoop = userNoUpdateOnLoopSuccess and userNoUpdateOnLoopValue
-
-        local AnimationSpeedDampeningObject = script:FindFirstChild("ScaleDampeningPercent")
-        local HumanoidHipHeight = 2
-
-        local humanoidSpeed = 0
-        local cachedRunningSpeed = 0
-        local cachedLocalDirection = { x = 0.0, y = 0.0 }
-        local smallButNotZero = 0.0001
-        local runBlendtime = 0.2
-        local lastLookVector = Vector3.new(0.0, 0.0, 0.0)
-        local lastBlendTime = 0
-        local WALK_SPEED = 6.4
-        local RUN_SPEED = 12.8
-
-        local EMOTE_TRANSITION_TIME = 0.1
-
-        local currentAnim = ""
-        local currentAnimInstance = nil
-        local currentAnimTrack = nil
-        local currentAnimKeyframeHandler = nil
-        local currentAnimSpeed = 1.0
-
-        local PreloadedAnims = {}
-
-        local animTable = {}
-        local locomotionMap
-        local strafingLocomotionMap = {}
-        local fallbackLocomotionMap = {}
-
-        local emoteNames = { wave = false, point = false, dance = true, dance2 = true, dance3 = true, laugh = false, cheer = false }
-
-        math.randomseed(tick())
-
-        local function findExistingAnimationInSet(set, anim)
-            if set == nil or anim == nil then
-                return 0
-            end
-
-            for idx = 1, set.count, 1 do
-                if set[idx].anim.AnimationId == anim.AnimationId then
-                    return idx
-                end
-            end
-
+    local function findExistingAnimationInSet(set, anim)
+        if set == nil or anim == nil then
             return 0
         end
 
-        local function configureAnimationSet(name, fileList)
-            if (animTable[name] ~= nil) then
-            end
-            animTable[name] = {}
-            animTable[name].count = 0
-            animTable[name].totalWeight = 0
-            animTable[name].connections = {}
-
-            if name == "run" or name == "walk" then
-                local speed = name == "run" and RUN_SPEED or WALK_SPEED
-                fallbackLocomotionMap[name] = { lv = Vector2.new(0.0, speed), speed = speed }
-                locomotionMap = fallbackLocomotionMap
-            end
-
-            if (animTable[name].count <= 0) then
-                for idx, anim in pairs(fileList) do
-                    animTable[name][idx] = {}
-                    animTable[name][idx].anim = Instance.new("Animation")
-                    animTable[name][idx].anim.Name = name
-                    animTable[name][idx].anim.AnimationId = anim.id
-                    animTable[name][idx].weight = anim.weight
-                    animTable[name].count = animTable[name].count + 1
-                    animTable[name].totalWeight = animTable[name].totalWeight + anim.weight
-                end
-            end
-
-            for i, animType in pairs(animTable) do
-                for idx = 1, animType.count, 1 do
-                    if PreloadedAnims[animType[idx].anim.AnimationId] == nil then
-                        Humanoid:LoadAnimation(animType[idx].anim)
-                        PreloadedAnims[animType[idx].anim.AnimationId] = true
-                    end
-                end
+        for idx = 1, set.count, 1 do
+            if set[idx].anim.AnimationId == anim.AnimationId then
+                return idx
             end
         end
 
-        local function scriptChildModified(child)
-            local fileList = animNames[child.Name]
-            if (fileList ~= nil) then
-                configureAnimationSet(child.Name, fileList)
-            else
-                if child:IsA("StringValue") then
-                    animNames[child.Name] = {}
-                    configureAnimationSet(child.Name, animNames[child.Name])
+        return 0
+    end
+
+    local function configureAnimationSet(name: string, fileList: { [number]: { id: string, weight: number } })
+        if (animTable[name] ~= nil) then
+            for _, connection in pairs(animTable[name].connections) do
+                connection:disconnect()
+            end
+        end
+        animTable[name] = { count = 0, totalWeight = 0, connections = {} }
+
+        if name == "run" or name == "walk" then
+            local speed = name == "run" and RUN_SPEED or WALK_SPEED
+            fallbackLocomotionMap[name] = { lv = Vector2.new(0.0, speed), speed = speed }
+            locomotionMap = fallbackLocomotionMap
+        end
+
+        if (animTable[name].count <= 0) then
+            for idx, anim in pairs(fileList) do
+                animTable[name][idx] = { anim = Instance.new("Animation"), weight = anim.weight }
+                animTable[name][idx].anim.Name = name
+                animTable[name][idx].anim.AnimationId = anim.id
+                animTable[name].count += 1
+                animTable[name].totalWeight += anim.weight
+            end
+        end
+
+        for _, animType in pairs(animTable) do
+            for idx = 1, animType.count, 1 do
+                if PreloadedAnims[animType[idx].anim.AnimationId] == nil then
+                    Humanoid:LoadAnimation(animType[idx].anim)
+                    PreloadedAnims[animType[idx].anim.AnimationId] = true
                 end
             end
         end
+    end
 
-        local animator = Humanoid and Humanoid:FindFirstChildOfClass("Animator") or nil
-        if animator then
-            local animTracks = animator:GetPlayingAnimationTracks()
-            for i, track in ipairs(animTracks) do
-                track:Stop(0)
-                track:Destroy()
-            end
-        end
-
-        for name, fileList in pairs(animNames) do
-            configureAnimationSet(name, fileList)
-        end
-        for _, child in script:GetChildren() do
-            if child:IsA("StringValue") and not animNames[child.name] then
+    local function scriptChildModified(child: Instance)
+        local fileList = animNames[child.Name]
+        if (fileList ~= nil) then
+            configureAnimationSet(child.Name, fileList)
+        else
+            if child:isA("StringValue") then
                 animNames[child.Name] = {}
                 configureAnimationSet(child.Name, animNames[child.Name])
             end
         end
+    end
 
-        local toolAnim = "None"
-        local toolAnimTime = 0
+    script.ChildAdded:connect(scriptChildModified)
+    script.ChildRemoved:connect(scriptChildModified)
 
-        local jumpAnimTime = 0
-        local jumpAnimDuration = 0.31
+    local animator = Humanoid and Humanoid:FindFirstChildOfClass("Animator") or nil
+    if animator then
+        local animTracks = animator:GetPlayingAnimationTracks()
+        for _, track in ipairs(animTracks) do
+            track:Stop(0)
+            track:Destroy()
+        end
+    end
 
-        local toolTransitionTime = 0.1
-        local fallTransitionTime = 0.2
+    for name, fileList in pairs(animNames) do
+        configureAnimationSet(name, fileList)
+    end
+    for _, child in script:GetChildren() do
+        if child:isA("StringValue") and not animNames[child.Name] then
+            animNames[child.Name] = {}
+            configureAnimationSet(child.Name, animNames[child.Name])
+        end
+    end
 
-        local currentlyPlayingEmote = false
+    local toolAnim = "None"
+    local toolAnimTime = 0
 
-        local function stopAllAnimations()
-            local oldAnim = currentAnim
+    local jumpAnimTime = 0
+    local jumpAnimDuration = 0.31
 
-            if (emoteNames[oldAnim] ~= nil and emoteNames[oldAnim] == false) then
-                oldAnim = "idle"
-            end
+    local toolTransitionTime = 0.1
+    local fallTransitionTime = 0.2
 
-            if currentlyPlayingEmote then
-                oldAnim = "idle"
-                currentlyPlayingEmote = false
-            end
+    local currentlyPlayingEmote = false
 
-            currentAnim = ""
-            currentAnimInstance = nil
-            if (currentAnimKeyframeHandler ~= nil) then
-                currentAnimKeyframeHandler:disconnect()
-            end
+    local function stopAllAnimations()
+        local oldAnim = currentAnim
 
-            if (currentAnimTrack ~= nil) then
-                currentAnimTrack:Stop()
-                currentAnimTrack:Destroy()
-                currentAnimTrack = nil
-            end
-
-            for _, v in pairs(locomotionMap) do
-                if v.track then
-                    v.track:Stop()
-                    v.track:Destroy()
-                    v.track = nil
-                end
-            end
-
-            return oldAnim
+        if (emoteNames[oldAnim] ~= nil and emoteNames[oldAnim] == false) then
+            oldAnim = "idle"
         end
 
-        local function getHeightScale()
-            if Humanoid then
-                if not Humanoid.AutomaticScalingEnabled then
-                    return 1
-                end
+        if currentlyPlayingEmote then
+            oldAnim = "idle"
+            currentlyPlayingEmote = false
+        end
 
-                local scale = Humanoid.HipHeight / HumanoidHipHeight
-                if AnimationSpeedDampeningObject == nil then
-                    AnimationSpeedDampeningObject = script:FindFirstChild("ScaleDampeningPercent")
-                end
-                if AnimationSpeedDampeningObject ~= nil then
-                    scale = 1 +
-                        (Humanoid.HipHeight - HumanoidHipHeight) * AnimationSpeedDampeningObject.Value /
-                        HumanoidHipHeight
-                end
-                return scale
+        currentAnim = ""
+        currentAnimInstance = nil
+        if (currentAnimKeyframeHandler ~= nil) then
+            currentAnimKeyframeHandler:disconnect()
+        end
+
+        if (currentAnimTrack ~= nil) then
+            currentAnimTrack:Stop()
+            currentAnimTrack:Destroy()
+            currentAnimTrack = nil
+        end
+
+        for _, v in pairs(locomotionMap) do
+            if v.track then
+                v.track:Stop()
+                v.track:Destroy()
+                v.track = nil
             end
-            return 1
         end
 
-        local function signedAngle(a, b)
-            return -math.atan2(a.x * b.y - a.y * b.x, a.x * b.x + a.y * b.y)
+        return oldAnim
+    end
+
+    local function getHeightScale()
+        if Humanoid then
+            if not Humanoid.AutomaticScalingEnabled then
+                return 1
+            end
+
+            local scale = Humanoid.HipHeight / HumanoidHipHeight
+            if AnimationSpeedDampeningObject == nil then
+                AnimationSpeedDampeningObject = script:FindFirstChild("ScaleDampeningPercent")
+            end
+            if AnimationSpeedDampeningObject ~= nil then
+                scale = 1 + (Humanoid.HipHeight - HumanoidHipHeight) * (AnimationSpeedDampeningObject as NumberValue).Value / HumanoidHipHeight
+            end
+            return scale
         end
+        return 1
+    end
 
-        local angleWeight = 2.0
-        local function get2DWeight(px, p1, p2, sx, s1, s2)
-            local avgLength = 0.5 * (s1 + s2)
+    local function signedAngle(a: Vector2, b: Vector2)
+        return -math.atan2(a.X * b.Y - a.Y * b.X, a.X * b.X + a.Y * b.Y)
+    end
 
-            local p_1 = { x = (sx - s1) / avgLength, y = (angleWeight * signedAngle(p1, px)) }
-            local p12 = { x = (s2 - s1) / avgLength, y = (angleWeight * signedAngle(p1, p2)) }
-            local denom = smallButNotZero + (p12.x * p12.x + p12.y * p12.y)
-            local numer = p_1.x * p12.x + p_1.y * p12.y
-            local r = math.clamp(1.0 - numer / denom, 0.0, 1.0)
-            return r
-        end
+    local angleWeight = 2.0
+    local function get2DWeight(px: Vector2, p1: Vector2, p2: Vector2, sx: number, s1: number, s2: number)
+        local avgLength = 0.5 * (s1 + s2)
 
-        local function blend2D(targetVelo, targetSpeed)
-            local h = {}
-            local sum = 0.0
-            for n, v1 in pairs(locomotionMap) do
-                if targetVelo.x * v1.lv.x < 0.0 or targetVelo.y * v1.lv.y < 0 then
-                    h[n] = 0.0
+        local p_1 = Vector2.new((sx - s1) / avgLength, (angleWeight * signedAngle(p1, px)))
+        local p12 = Vector2.new((s2 - s1) / avgLength, (angleWeight * signedAngle(p1, p2)))
+        local denom = smallButNotZero + (p12.X * p12.X + p12.Y * p12.Y)
+
+        local numer = p_1.X * p12.X + p_1.Y * p12.Y
+        local r = math.clamp(1.0 - numer / denom, 0.0, 1.0)
+        return r
+    end
+
+    local function blend2D(targetVelo: Vector2, targetSpeed: number)
+        local h: { [string]: number } = {}
+        local sum = 0.0
+        for n, v1 in pairs(locomotionMap) do
+            if targetVelo.X * v1.lv.X < 0.0 or targetVelo.Y * v1.lv.Y < 0 then
+                h[n] = 0.0
+                continue
+            end
+            h[n] = math.huge
+            for j, v2 in pairs(locomotionMap) do
+                if targetVelo.X * v2.lv.X < 0.0 or targetVelo.Y * v2.lv.Y < 0 then
                     continue
                 end
-                h[n] = math.huge
-                for j, v2 in pairs(locomotionMap) do
-                    if targetVelo.x * v2.lv.x < 0.0 or targetVelo.y * v2.lv.y < 0 then
-                        continue
-                    end
-                    h[n] = math.min(h[n], get2DWeight(targetVelo, v1.lv, v2.lv, targetSpeed, v1.speed, v2.speed))
-                end
-                sum += h[n]
+                h[n] = math.min(h[n], get2DWeight(targetVelo, v1.lv, v2.lv, targetSpeed, v1.speed, v2.speed))
             end
+            sum += h[n]
+        end
 
-            local sum2 = 0.0
-            local weightedVeloX = 0
-            local weightedVeloY = 0
-            for n, v in pairs(locomotionMap) do
-                if (h[n] / sum > 0.1) then
-                    sum2 += h[n]
-                    weightedVeloX += h[n] * v.lv.x
-                    weightedVeloY += h[n] * v.lv.y
-                else
-                    h[n] = 0.0
-                end
-            end
-            local animSpeed
-            local weightedSpeedSquared = weightedVeloX * weightedVeloX + weightedVeloY * weightedVeloY
-            if weightedSpeedSquared > smallButNotZero then
-                animSpeed = math.sqrt(targetSpeed * targetSpeed / weightedSpeedSquared)
+        local sum2 = 0.0
+        local weightedVeloX = 0
+        local weightedVeloY = 0
+        for n, v in pairs(locomotionMap) do
+            if (h[n] / sum > 0.1) then
+                sum2 += h[n]
+                weightedVeloX += h[n] * v.lv.X
+                weightedVeloY += h[n] * v.lv.Y
             else
-                animSpeed = 0
+                h[n] = 0.0
             end
+        end
+        local animSpeed
+        local weightedSpeedSquared = weightedVeloX * weightedVeloX + weightedVeloY * weightedVeloY
+        if weightedSpeedSquared > smallButNotZero then
+            animSpeed = math.sqrt(targetSpeed * targetSpeed / weightedSpeedSquared)
+        else
+            animSpeed = 0
+        end
 
-            animSpeed = animSpeed / getHeightScale()
-            local groupTimePosition = 0
-            for n, v in pairs(locomotionMap) do
-                if v.track and v.track.IsPlaying then
-                    groupTimePosition = v.track.TimePosition
-                    break
+        animSpeed = animSpeed / getHeightScale()
+        local groupTimePosition = 0
+        for n, v in pairs(locomotionMap) do
+            if v.track and v.track.IsPlaying then
+                groupTimePosition = v.track.TimePosition
+                break
+            end
+        end
+        for n, v in pairs(locomotionMap) do
+            if h[n] > 0.0 then
+                if v.track and not v.track.IsPlaying then
+                    v.track:Play(runBlendtime)
+                    v.track.TimePosition = groupTimePosition
                 end
-            end
-            for n, v in pairs(locomotionMap) do
-                if h[n] > 0.0 then
-                    if not v.track or not v.track.IsPlaying then
-                        v.track = Humanoid:LoadAnimation(animTable[n][1].anim)
-                        v.track.Priority = Enum.AnimationPriority.Core
-                        v.track:Play(runBlendtime)
-                        v.track.TimePosition = groupTimePosition
-                    end
 
+                if v.track then
                     local weight = math.max(smallButNotZero, h[n] / sum2)
                     v.track:AdjustWeight(weight, runBlendtime)
                     v.track:AdjustSpeed(animSpeed)
-                else
+                end
+            else
+                if v.track then
+                    v.track:Stop(runBlendtime)
+                end
+            end
+        end
+    end
+
+    local function getWalkDirection()
+        local walkToPoint = Humanoid.WalkToPoint
+        local walkToPart = Humanoid.WalkToPart
+        if Humanoid.MoveDirection ~= Vector3.zero then
+            return Humanoid.MoveDirection
+        elseif walkToPart or walkToPoint ~= Vector3.zero then
+            local destination: Vector3
+            if walkToPart then
+                destination = walkToPart.CFrame:PointToWorldSpace(walkToPoint)
+            else
+                destination = walkToPoint
+            end
+            local moveVector = Vector3.zero
+            if Humanoid.RootPart then
+                moveVector = destination - Humanoid.RootPart.CFrame.Position
+                moveVector = Vector3.new(moveVector.X, 0.0, moveVector.Z)
+                local mag = moveVector.Magnitude
+                if mag > 0.01 then
+                    moveVector /= mag
+                end
+            end
+            return moveVector
+        else
+            return Humanoid.MoveDirection
+        end
+    end
+
+    local function updateVelocity(currentTime: number)
+        local tempDir: Vector2?
+
+        if locomotionMap == strafingLocomotionMap then
+            local moveDirection = getWalkDirection()
+
+            if not Humanoid.RootPart then
+                return
+            end
+
+            local cframe = Humanoid.RootPart.CFrame
+            if math.abs(cframe.UpVector.Y) < smallButNotZero or pose ~= "Running" or humanoidSpeed < 0.001 then
+                for n, v in pairs(locomotionMap) do
                     if v.track then
-                        v.track:Stop(runBlendtime)
+                        v.track:AdjustWeight(smallButNotZero, runBlendtime)
                     end
                 end
+                return
+            end
+            local lookat = cframe.LookVector
+            local direction = Vector3.new(lookat.X, 0.0, lookat.Z)
+            direction = direction / direction.Magnitude
+            local ly = moveDirection:Dot(direction)
+            if ly <= 0.0 and ly > -0.05 then
+                ly = smallButNotZero
+            end
+            local lx = direction.X * moveDirection.Z - direction.Z * moveDirection.X
+
+            tempDir = Vector2.new(lx, ly)
+            local delta = Vector2.new(tempDir.X - cachedLocalDirection.x, tempDir.Y - cachedLocalDirection.y)
+            if delta:Dot(delta) > 0.001 or math.abs(humanoidSpeed - cachedRunningSpeed) > 0.01 or currentTime - lastBlendTime > 1 then
+                cachedLocalDirection = tempDir
+                cachedRunningSpeed = humanoidSpeed
+                lastBlendTime = currentTime
+                blend2D(cachedLocalDirection, cachedRunningSpeed)
+            end
+        else
+            if math.abs(humanoidSpeed - cachedRunningSpeed) > 0.01 or currentTime - lastBlendTime > 1 then
+                cachedRunningSpeed = humanoidSpeed
+                lastBlendTime = currentTime
+                blend2D(Vector2.yAxis, cachedRunningSpeed)
             end
         end
+    end
 
-        local function getWalkDirection()
-            local walkToPoint = Humanoid.WalkToPoint
-            local walkToPart = Humanoid.WalkToPart
-            if Humanoid.MoveDirection ~= Vector3.zero then
-                return Humanoid.MoveDirection
-            elseif walkToPart or walkToPoint ~= Vector3.zero then
-                local destination
-                if walkToPart then
-                    destination = walkToPart.CFrame:PointToWorldSpace(walkToPoint)
-                else
-                    destination = walkToPoint
-                end
-                local moveVector = Vector3.zero
-                if Humanoid.RootPart then
-                    moveVector = destination - Humanoid.RootPart.CFrame.Position
-                    moveVector = Vector3.new(moveVector.x, 0.0, moveVector.z)
-                    local mag = moveVector.Magnitude
-                    if mag > 0.01 then
-                        moveVector /= mag
-                    end
-                end
-                return moveVector
-            else
-                return Humanoid.MoveDirection
-            end
-        end
-
-        local maxVeloX, minVeloX, maxVeloY, minVeloY
-
-        local function updateVelocity(currentTime)
-            local tempDir
-
-            if locomotionMap == strafingLocomotionMap then
-                local moveDirection = getWalkDirection()
-
-                if not Humanoid.RootPart then
-                    return
-                end
-
-                local cframe = Humanoid.RootPart.CFrame
-                if math.abs(cframe.UpVector.Y) < smallButNotZero or pose ~= "Running" or humanoidSpeed < 0.001 then
-                    for n, v in pairs(locomotionMap) do
-                        if v.track then
-                            v.track:AdjustWeight(smallButNotZero, runBlendtime)
-                        end
-                    end
-                    return
-                end
-                local lookat = cframe.LookVector
-                local direction = Vector3.new(lookat.X, 0.0, lookat.Z)
-                direction = direction / direction.Magnitude
-                local ly = moveDirection:Dot(direction)
-                if ly <= 0.0 and ly > -0.05 then
-                    ly = smallButNotZero
-                end
-                local lx = direction.X * moveDirection.Z - direction.Z * moveDirection.X
-                local tempDir = Vector2.new(lx, ly)
-                local delta = Vector2.new(tempDir.x - cachedLocalDirection.x, tempDir.y - cachedLocalDirection.y)
-                if delta:Dot(delta) > 0.001 or math.abs(humanoidSpeed - cachedRunningSpeed) > 0.01 or currentTime - lastBlendTime > 1 then
-                    cachedLocalDirection = tempDir
-                    cachedRunningSpeed = humanoidSpeed
-                    lastBlendTime = currentTime
-                    blend2D(cachedLocalDirection, cachedRunningSpeed)
-                end
-            else
-                if math.abs(humanoidSpeed - cachedRunningSpeed) > 0.01 or currentTime - lastBlendTime > 1 then
-                    cachedRunningSpeed = humanoidSpeed
-                    lastBlendTime = currentTime
-                    blend2D(Vector2.yAxis, cachedRunningSpeed)
-                end
-            end
-        end
-
-        local function setAnimationSpeed(speed)
-            if currentAnim ~= "walk" then
-                if speed ~= currentAnimSpeed then
-                    currentAnimSpeed = speed
+    local function setAnimationSpeed(speed: number)
+        if currentAnim ~= "walk" then
+            if speed ~= currentAnimSpeed then
+                currentAnimSpeed = speed
+                if currentAnimTrack then
                     currentAnimTrack:AdjustSpeed(currentAnimSpeed)
                 end
             end
         end
+    end
 
-        local function keyFrameReachedFunc(frameName)
-            if (frameName == "End") then
-                local repeatAnim = currentAnim
-                if (emoteNames[repeatAnim] ~= nil and emoteNames[repeatAnim] == false) then
-                    repeatAnim = "idle"
-                end
+    local function playAnimation(animName: string, transitionTime: number, humanoid: Humanoid)
+        local idx = rollAnimation(animName)
+        local anim = animTable[animName][idx].anim
 
-                if currentlyPlayingEmote then
-                    if currentAnimTrack.Looped then
-                        return
-                    end
-
-                    repeatAnim = "idle"
-                    currentlyPlayingEmote = false
-                end
-
-                local animSpeed = currentAnimSpeed
-                playAnimation(repeatAnim, 0.15, Humanoid)
-                setAnimationSpeed(animSpeed)
-            end
-        end
-
-        local function rollAnimation(animName)
-            local roll = math.random(1, animTable[animName].totalWeight)
-            local idx = 1
-            while (roll > animTable[animName][idx].weight) do
-                roll = roll - animTable[animName][idx].weight
-                idx = idx + 1
-            end
-            return idx
-        end
-
-        local function destroyRunAnimations()
-            for _, v in pairs(strafingLocomotionMap) do
-                if v.track then
-                    v.track:Stop()
-                    v.track:Destroy()
-                    v.track = nil
-                end
-            end
-            for _, v in pairs(fallbackLocomotionMap) do
-                if v.track then
-                    v.track:Stop()
-                    v.track:Destroy()
-                    v.track = nil
-                end
-            end
-            cachedRunningSpeed = 0
-        end
-
-        local function resetVelocityBounds(velo)
-            minVeloX = 0
-            maxVeloX = 0
-            minVeloY = 0
-            maxVeloY = 0
-        end
-
-        local function updateVelocityBounds(velo)
-            if velo then
-                if velo.x > maxVeloX then maxVeloX = velo.x end
-                if velo.y > maxVeloY then maxVeloY = velo.y end
-                if velo.x < minVeloX then minVeloX = velo.x end
-                if velo.y < minVeloY then minVeloY = velo.y end
-            end
-        end
-
-        local function checkVelocityBounds(velo)
-            if maxVeloX == 0 or minVeloX == 0 or maxVeloY == 0 or minVeloY == 0 then
-                locomotionMap = fallbackLocomotionMap
-            else
-                locomotionMap = strafingLocomotionMap
-            end
-        end
-
-        local function setupWalkAnimation(anim, animName, transitionTime, humanoid)
-            resetVelocityBounds()
-            for n, v in pairs(locomotionMap) do
-                v.track = humanoid:LoadAnimation(animTable[n][1].anim)
-                v.track.Priority = Enum.AnimationPriority.Core
-                updateVelocityBounds(v.lv)
-            end
-            checkVelocityBounds()
-        end
-
-        local function switchToAnim(anim, animName, transitionTime, humanoid)
+        local function switchToAnim(anim: Animation, animName: string, transitionTime: number, humanoid: Humanoid)
             if (anim ~= currentAnimInstance) then
                 if (currentAnimTrack ~= nil) then
                     currentAnimTrack:Stop(transitionTime)
@@ -546,394 +473,521 @@ return function(settings)
                 currentAnimInstance = anim
 
                 if animName == "walk" then
-                    setupWalkAnimation(anim, animName, transitionTime, humanoid)
+                    local minVeloX, minVeloY, maxVeloX, maxVeloY
+                    local function resetVelocityBounds()
+                        minVeloX = 0
+                        maxVeloX = 0
+                        minVeloY = 0
+                        maxVeloY = 0
+                    end
+                    local function updateVelocityBounds(velo: Vector2?)
+                        if velo then
+                            if velo.X > maxVeloX then maxVeloX = velo.X end
+                            if velo.Y > maxVeloY then maxVeloY = velo.Y end
+                            if velo.X < minVeloX then minVeloX = velo.X end
+                            if velo.Y < minVeloY then minVeloY = velo.Y end
+                        end
+                    end
+                    local function checkVelocityBounds()
+                        if maxVeloX == 0 or minVeloX == 0 or maxVeloY == 0 or minVeloY == 0 then
+                            if locomotionMap == strafingLocomotionMap then
+                                warn("Strafe blending disabled. Not all quadrants of motion represented.")
+                            end
+                            locomotionMap = fallbackLocomotionMap
+                        else
+                            locomotionMap = strafingLocomotionMap
+                        end
+                    end
+
+                    resetVelocityBounds()
+                    for n, v in pairs(locomotionMap) do
+                        v.track = humanoid:LoadAnimation(animTable[n][1].anim)
+                        v.track.Priority = Enum.AnimationPriority.Core
+                        updateVelocityBounds(v.lv)
+                    end
+                    checkVelocityBounds()
                 else
+                    local function destroyRunAnimations()
+                        for _, v in pairs(strafingLocomotionMap) do
+                            if v.track then
+                                v.track:Stop()
+                                v.track:Destroy()
+                                v.track = nil
+                            end
+                        end
+                        for _, v in pairs(fallbackLocomotionMap) do
+                            if v.track then
+                                v.track:Stop()
+                                v.track:Destroy()
+                                v.track = nil
+                            end
+                        end
+                        cachedRunningSpeed = 0
+                    end
                     destroyRunAnimations()
                     currentAnimTrack = humanoid:LoadAnimation(anim)
                     currentAnimTrack.Priority = Enum.AnimationPriority.Core
 
                     currentAnimTrack:Play(transitionTime)
 
+                    local function keyFrameReachedFunc(frameName: string)
+                        if (frameName == "End") then
+                            local repeatAnim = currentAnim
+                            if (emoteNames[repeatAnim] ~= nil and emoteNames[repeatAnim] == false) then
+                                repeatAnim = "idle"
+                            end
+
+                            if currentlyPlayingEmote then
+                                if currentAnimTrack and currentAnimTrack.Looped then
+                                    return
+                                end
+
+                                repeatAnim = "idle"
+                                currentlyPlayingEmote = false
+                            end
+
+                            local animSpeed = currentAnimSpeed
+                            playAnimation(repeatAnim, 0.15, Humanoid)
+                            setAnimationSpeed(animSpeed)
+                        end
+                    end
                     currentAnimKeyframeHandler = currentAnimTrack.KeyframeReached:connect(keyFrameReachedFunc)
                 end
             end
         end
 
-        local function playAnimation(animName, transitionTime, humanoid)
-            local idx = rollAnimation(animName)
-            local anim = animTable[animName][idx].anim
+        switchToAnim(anim, animName, transitionTime, humanoid)
+        currentlyPlayingEmote = false
+    end
 
-            switchToAnim(anim, animName, transitionTime, humanoid)
-            currentlyPlayingEmote = false
-        end
-
-        local function playEmote(emoteAnim, transitionTime, humanoid)
-            switchToAnim(emoteAnim, emoteAnim.Name, transitionTime, humanoid)
-            currentlyPlayingEmote = true
-        end
-
-        local toolAnimName = ""
-        local toolAnimTrack = nil
-        local toolAnimInstance = nil
-        local currentToolAnimKeyframeHandler = nil
-
-        local function toolKeyFrameReachedFunc(frameName)
-            if (frameName == "End") then
-                playToolAnimation(toolAnimName, 0.0, Humanoid)
-            end
-        end
-
-        local function playToolAnimation(animName, transitionTime, humanoid, priority)
-            local idx = rollAnimation(animName)
-            local anim = animTable[animName][idx].anim
-
-            if (toolAnimInstance ~= anim) then
-                if (toolAnimTrack ~= nil) then
-                    toolAnimTrack:Stop()
-                    toolAnimTrack:Destroy()
-                    transitionTime = 0
+    local function playEmote(emoteAnim: Animation, transitionTime: number, humanoid: Humanoid)
+        local function switchToAnim(anim: Animation, animName: string, transitionTime: number, humanoid: Humanoid)
+            if (anim ~= currentAnimInstance) then
+                if (currentAnimTrack ~= nil) then
+                    currentAnimTrack:Stop(transitionTime)
+                    currentAnimTrack:Destroy()
+                end
+                if (currentAnimKeyframeHandler ~= nil) then
+                    currentAnimKeyframeHandler:disconnect()
                 end
 
-                toolAnimTrack = humanoid:LoadAnimation(anim)
-                if priority then
-                    toolAnimTrack.Priority = priority
+                currentAnimSpeed = 1.0
+
+                currentAnim = animName
+                currentAnimInstance = anim
+
+                local function destroyRunAnimations()
+                    for _, v in pairs(strafingLocomotionMap) do
+                        if v.track then
+                            v.track:Stop()
+                            v.track:Destroy()
+                            v.track = nil
+                        end
+                    end
+                    for _, v in pairs(fallbackLocomotionMap) do
+                        if v.track then
+                            v.track:Stop()
+                            v.track:Destroy()
+                            v.track = nil
+                        end
+                    end
+                    cachedRunningSpeed = 0
                 end
+                destroyRunAnimations()
+                currentAnimTrack = humanoid:LoadAnimation(anim)
+                currentAnimTrack.Priority = Enum.AnimationPriority.Core
 
-                toolAnimTrack:Play(transitionTime)
-                toolAnimName = animName
-                toolAnimInstance = anim
+                currentAnimTrack:Play(transitionTime)
 
-                currentToolAnimKeyframeHandler = toolAnimTrack.KeyframeReached:connect(toolKeyFrameReachedFunc)
+                local function keyFrameReachedFunc(frameName: string)
+                    if (frameName == "End") then
+                        local repeatAnim = currentAnim
+                        if (emoteNames[repeatAnim] ~= nil and emoteNames[repeatAnim] == false) then
+                            repeatAnim = "idle"
+                        end
+
+                        if currentlyPlayingEmote then
+                            if currentAnimTrack and currentAnimTrack.Looped then
+                                return
+                            end
+
+                            repeatAnim = "idle"
+                            currentlyPlayingEmote = false
+                        end
+
+                        local animSpeed = currentAnimSpeed
+                        playAnimation(repeatAnim, 0.15, Humanoid)
+                        setAnimationSpeed(animSpeed)
+                    end
+                end
+                currentAnimKeyframeHandler = currentAnimTrack.KeyframeReached:connect(keyFrameReachedFunc)
             end
         end
+        switchToAnim(emoteAnim, emoteAnim.Name, transitionTime, humanoid)
+        currentlyPlayingEmote = true
+    end
 
-        local function stopToolAnimations()
-            local oldAnim = toolAnimName
+    local function rollAnimation(animName: string)
+        local roll = math.random(1, animTable[animName].totalWeight)
+        local origRoll = roll
+        local idx = 1
+        while (roll > animTable[animName][idx].weight) do
+            roll = roll - animTable[animName][idx].weight
+            idx = idx + 1
+        end
+        return idx
+    end
 
-            if (currentToolAnimKeyframeHandler ~= nil) then
-                currentToolAnimKeyframeHandler:disconnect()
-            end
+    local toolAnimName = ""
+    local toolAnimTrack: AnimationTrack? = nil
+    local toolAnimInstance: Animation? = nil
+    local currentToolAnimKeyframeHandler: RBXScriptConnection? = nil
 
-            toolAnimName = ""
-            toolAnimInstance = nil
+    local function toolKeyFrameReachedFunc(frameName: string)
+        if (frameName == "End") then
+            playToolAnimation(toolAnimName, 0.0, Humanoid)
+        end
+    end
+
+    local function playToolAnimation(animName: string, transitionTime: number, humanoid: Humanoid, priority: Enum.AnimationPriority?)
+        local idx = rollAnimation(animName)
+        local anim = animTable[animName][idx].anim
+
+        if (toolAnimInstance ~= anim) then
             if (toolAnimTrack ~= nil) then
                 toolAnimTrack:Stop()
                 toolAnimTrack:Destroy()
-                toolAnimTrack = nil
+                transitionTime = 0
             end
 
-            return oldAnim
-        end
-
-        local function onRunning(speed)
-            local movedDuringEmote = currentlyPlayingEmote and Humanoid.MoveDirection == Vector3.new(0, 0, 0)
-            local speedThreshold = movedDuringEmote and Humanoid.WalkSpeed or 0.75
-            humanoidSpeed = speed
-            if speed > speedThreshold then
-                playAnimation("walk", 0.2, Humanoid)
-                if pose ~= "Running" then
-                    pose = "Running"
-                    updateVelocity(0)
-                end
-            else
-                if emoteNames[currentAnim] == nil and not currentlyPlayingEmote then
-                    playAnimation("idle", 0.2, Humanoid)
-                    pose = "Standing"
-                end
+            toolAnimTrack = humanoid:LoadAnimation(anim)
+            if priority then
+                toolAnimTrack.Priority = priority
             end
+
+            toolAnimTrack:Play(transitionTime)
+            toolAnimName = animName
+            toolAnimInstance = anim
+
+            currentToolAnimKeyframeHandler = toolAnimTrack.KeyframeReached:connect(toolKeyFrameReachedFunc)
+        end
+    end
+
+    local function stopToolAnimations()
+        local oldAnim = toolAnimName
+
+        if (currentToolAnimKeyframeHandler ~= nil) then
+            currentToolAnimKeyframeHandler:disconnect()
         end
 
-        local function onDied()
-            pose = "Dead"
+        toolAnimName = ""
+        toolAnimInstance = nil
+        if (toolAnimTrack ~= nil) then
+            toolAnimTrack:Stop()
+            toolAnimTrack:Destroy()
+            toolAnimTrack = nil
         end
 
-        local function onJumping()
-            playAnimation("jump", 0.1, Humanoid)
-            jumpAnimTime = jumpAnimDuration
-            pose = "Jumping"
-        end
+        return oldAnim
+    end
 
-        local function onClimbing(speed)
-            local scale = 5.0
-            playAnimation("climb", 0.1, Humanoid)
-            setAnimationSpeed(speed / scale)
-            pose = "Climbing"
-        end
-
-        local function onGettingUp()
-            pose = "GettingUp"
-        end
-
-        local function onFreeFall()
-            if (jumpAnimTime <= 0) then
-                playAnimation("fall", fallTransitionTime, Humanoid)
-            end
-            pose = "FreeFall"
-        end
-
-        local function onFallingDown()
-            pose = "FallingDown"
-        end
-
-        local function onSeated()
-            pose = "Seated"
-        end
-
-        local function onPlatformStanding()
-            pose = "PlatformStanding"
-        end
-
-        local function onSwimming(speed)
-            if speed > 0 then
+    local function onRunning(speed: number)
+        local movedDuringEmote = currentlyPlayingEmote and Humanoid.MoveDirection == Vector3.new(0, 0, 0)
+        local speedThreshold = movedDuringEmote and Humanoid.WalkSpeed or 0.75
+        humanoidSpeed = speed
+        if speed > speedThreshold then
+            playAnimation("walk", 0.2, Humanoid)
+            if pose ~= "Running" then
                 pose = "Running"
-            else
+                updateVelocity(0)
+            end
+        else
+            if emoteNames[currentAnim] == nil and not currentlyPlayingEmote then
+                playAnimation("idle", 0.2, Humanoid)
                 pose = "Standing"
             end
         end
-
-        local function animateTool()
-            if (toolAnim == "None") then
-                playToolAnimation("toolnone", toolTransitionTime, Humanoid, Enum.AnimationPriority.Idle)
-                return
-            end
-
-            if (toolAnim == "Slash") then
-                playToolAnimation("toolslash", 0, Humanoid, Enum.AnimationPriority.Action)
-                return
-            end
-
-            if (toolAnim == "Lunge") then
-                playToolAnimation("toollunge", 0, Humanoid, Enum.AnimationPriority.Action)
-                return
-            end
-        end
-
-        local function getToolAnim(tool)
-            for _, c in ipairs(tool:GetChildren()) do
-                if c.Name == "toolanim" and c.className == "StringValue" then
-                    return c
-                end
-            end
-            return nil
-        end
-
-        local lastTick = 0
-
-        local function stepAnimate(currentTime)
-            local amplitude = 1
-            local frequency = 1
-            local deltaTime = currentTime - lastTick
-            lastTick = currentTime
-
-            local climbFudge = 0
-            local setAngles = false
-
-            if (jumpAnimTime > 0) then
-                jumpAnimTime = jumpAnimTime - deltaTime
-            end
-
-            if (pose == "FreeFall" and jumpAnimTime <= 0) then
-                playAnimation("fall", fallTransitionTime, Humanoid)
-            elseif (pose == "Seated") then
-                playAnimation("sit", 0.5, Humanoid)
-                return
-            elseif (pose == "Running") then
-                playAnimation("walk", 0.2, Humanoid)
-                updateVelocity(currentTime)
-            elseif (pose == "Dead" or pose == "GettingUp" or pose == "FallingDown" or pose == "Seated" or pose == "PlatformStanding") then
-                stopAllAnimations()
-                amplitude = 0.1
-                frequency = 1
-                setAngles = true
-            end
-
-            local tool = Character:FindFirstChildOfClass("Tool")
-            if tool and tool:FindFirstChild("Handle") then
-                local animStringValueObject = getToolAnim(tool)
-
-                if animStringValueObject then
-                    toolAnim = animStringValueObject.Value
-                    animStringValueObject.Parent = nil
-                    toolAnimTime = currentTime + .3
-                end
-
-                if currentTime > toolAnimTime then
-                    toolAnimTime = 0
-                    toolAnim = "None"
-                end
-
-                animateTool()
-            else
-                stopToolAnimations()
-                toolAnim = "None"
-                toolAnimInstance = nil
-                toolAnimTime = 0
-            end
-        end
-
-        Humanoid.Died:Connect(onDied)
-        Humanoid.Running:Connect(onRunning)
-        Humanoid.Jumping:Connect(onJumping)
-        Humanoid.Climbing:Connect(onClimbing)
-        Humanoid.GettingUp:Connect(onGettingUp)
-        Humanoid.FreeFalling:Connect(onFreeFall)
-        Humanoid.FallingDown:Connect(onFallingDown)
-        Humanoid.Seated:Connect(onSeated)
-        Humanoid.PlatformStanding:Connect(onPlatformStanding)
-        Humanoid.Swimming:Connect(onSwimming)
-
-        game:GetService("Players").LocalPlayer.Chatted:Connect(function(msg)
-            local emote = ""
-            if (string.sub(msg, 1, 3) == "/e ") then
-                emote = string.sub(msg, 4)
-            elseif (string.sub(msg, 1, 7) == "/emote ") then
-                emote = string.sub(msg, 8)
-            end
-
-            if (pose == "Standing" and emoteNames[emote] ~= nil) then
-                playAnimation(emote, EMOTE_TRANSITION_TIME, Humanoid)
-            end
-        end)
-
-        script:WaitForChild("PlayEmote").OnInvoke = function(emote)
-            if pose ~= "Standing" then
-                return
-            end
-
-            if emoteNames[emote] ~= nil then
-                playAnimation(emote, EMOTE_TRANSITION_TIME, Humanoid)
-
-                return true, currentAnimTrack
-            elseif typeof(emote) == "Instance" and emote:IsA("Animation") then
-                playEmote(emote, EMOTE_TRANSITION_TIME, Humanoid)
-
-                return true, currentAnimTrack
-            end
-            return false
-        end
-
-        if Character.Parent ~= nil then
-            playAnimation("idle", 0.1, Humanoid)
-            pose = "Standing"
-        end
-
-        task.spawn(function()
-            while Character.Parent ~= nil do
-                local _, currentGameTime = task.wait(0.1)
-                stepAnimate(currentGameTime)
-            end
-        end)
     end
 
-    local function Setup()
-        local Player = game:GetService("Players").LocalPlayer
-        originalRealCharacter = Player.Character or Player.CharacterAdded:Wait()
-        local OriginalCFrame = originalRealCharacter.HumanoidRootPart.CFrame
+    local function onDied()
+        pose = "Dead"
+    end
 
-        originalRealCharacter.Archivable = true
-        FakeCharacter = originalRealCharacter:Clone()
+    local function onJumping()
+        playAnimation("jump", 0.1, Humanoid)
+        jumpAnimTime = jumpAnimDuration
+        pose = "Jumping"
+    end
 
-        local Humanoid = FakeCharacter:WaitForChild("Humanoid")
+    local function onClimbing(speed: number)
+        local scale = 5.0
+        playAnimation("climb", 0.1, Humanoid)
+        setAnimationSpeed(speed / scale)
+        pose = "Climbing"
+    end
 
-        Humanoid.AutomaticScalingEnabled = false
+    local function onGettingUp()
+        pose = "GettingUp"
+    end
 
-        Humanoid.BodyDepthScale.Value = Depth * NormalShit * Scale
-        Humanoid.BodyHeightScale.Value = Height * NormalShit * Scale
-        Humanoid.BodyProportionScale.Value = 0
-        Humanoid.BodyWidthScale.Value = Width * NormalShit * Scale
-        Humanoid.HeadScale.Value = Head * NormalShit * Scale
-        
-        Humanoid.AutomaticScalingEnabled = true
+    local function onFreeFall()
+        if (jumpAnimTime <= 0) then
+            playAnimation("fall", fallTransitionTime, Humanoid)
+        end
+        pose = "FreeFall"
+    end
 
-        PlatformPart = Instance.new("Part")
-        PlatformPart.Name = "FakeCharacterPlatform"
-        PlatformPart.Anchored = true
-        PlatformPart.Size = Vector3.new(200, 1, 200)
-        PlatformPart.CFrame = CFrame.new(0, -500, 0)
-        PlatformPart.CanCollide = true
-        PlatformPart.Transparency = 1
-        PlatformPart.Parent = workspace
+    local function onFallingDown()
+        pose = "FallingDown"
+    end
 
-        FakeCharacter.Parent = workspace
-        FakeCharacter.HumanoidRootPart.CFrame = OriginalCFrame
-        FakeCharacter.Name = originalRealCharacter.Name .. "_Fake"
+    local function onSeated()
+        pose = "Seated"
+    end
 
-        for _, v in pairs(FakeCharacter:GetChildren()) do
-            if v:IsA("LocalScript") then
-                v.Disabled = false
-            end
+    local function onPlatformStanding()
+        pose = "PlatformStanding"
+    end
+
+    local function onSwimming(speed: number)
+        if speed > 0 then
+            pose = "Running"
+        else
+            pose = "Standing"
+        end
+    end
+
+    local function animateTool()
+        if (toolAnim == "None") then
+            playToolAnimation("toolnone", toolTransitionTime, Humanoid, Enum.AnimationPriority.Idle)
+            return
         end
 
-        for _, v in pairs(FakeCharacter:GetDescendants()) do
-            if v:IsA("BasePart") then
-                v.Transparency = 1
-            end
+        if (toolAnim == "Slash") then
+            playToolAnimation("toolslash", 0, Humanoid, Enum.AnimationPriority.Action)
+            return
         end
 
-        originalRealCharacter.HumanoidRootPart.CFrame = PlatformPart.CFrame * CFrame.new(0, 5, 0)
+        if (toolAnim == "Lunge") then
+            playToolAnimation("toollunge", 0, Humanoid, Enum.AnimationPriority.Action)
+            return
+        end
+    end
 
-        Player.Character = FakeCharacter
-        workspace.CurrentCamera.CameraSubject = FakeCharacter.Humanoid
-        FakeCharacter.Humanoid.WalkSpeed = 16
+    local function getToolAnim(tool: Tool)
+        for _, c in ipairs(tool:GetChildren()) do
+            if c.Name == "toolanim" and c:IsA("StringValue") then
+                return c
+            end
+        end
+        return nil
+    end
 
-        RunCustomAnimation(FakeCharacter)
+    local lastTick = 0
 
-        game:GetService("StarterGui"):SetCore("SendNotification", {
+    local function stepAnimate(currentTime: number)
+        local amplitude = 1
+        local frequency = 1
+        local deltaTime = currentTime - lastTick
+        lastTick = currentTime
+
+        local climbFudge = 0
+        local setAngles = false
+
+        if (jumpAnimTime > 0) then
+            jumpAnimTime = jumpAnimTime - deltaTime
+        end
+
+        if (pose == "FreeFall" and jumpAnimTime <= 0) then
+            playAnimation("fall", fallTransitionTime, Humanoid)
+        elseif (pose == "Seated") then
+            playAnimation("sit", 0.5, Humanoid)
+            return
+        elseif (pose == "Running") then
+            playAnimation("walk", 0.2, Humanoid)
+            updateVelocity(currentTime)
+        elseif (pose == "Dead" or pose == "GettingUp" or pose == "FallingDown" or pose == "Seated" or pose == "PlatformStanding") then
+            stopAllAnimations()
+            amplitude = 0.1
+            frequency = 1
+            setAngles = true
+        end
+
+        local tool = Character:FindFirstChildOfClass("Tool")
+        if tool and tool:FindFirstChild("Handle") then
+            local animStringValueObject = getToolAnim(tool)
+
+            if animStringValueObject then
+                toolAnim = animStringValueObject.Value
+                animStringValueObject.Parent = nil
+                toolAnimTime = currentTime + .3
+            end
+
+            if currentTime > toolAnimTime then
+                toolAnimTime = 0
+                toolAnim = "None"
+            end
+
+            animateTool()
+        else
+            stopToolAnimations()
+            toolAnim = "None"
+            toolAnimInstance = nil
+            toolAnimTime = 0
+        end
+    end
+
+    Humanoid.Died:connect(onDied)
+    Humanoid.Running:connect(onRunning)
+    Humanoid.Jumping:connect(onJumping)
+    Humanoid.Climbing:connect(onClimbing)
+    Humanoid.GettingUp:connect(onGettingUp)
+    Humanoid.FreeFalling:connect(onFreeFall)
+    Humanoid.FallingDown:connect(onFallingDown)
+    Humanoid.Seated:connect(onSeated)
+    Humanoid.PlatformStanding:connect(onPlatformStanding)
+    Humanoid.Swimming:connect(onSwimming)
+
+    Players.LocalPlayer.Chatted:connect(function(msg: string)
+        local emote = ""
+        if (string.sub(msg, 1, 3) == "/e ") then
+            emote = string.sub(msg, 4)
+        elseif (string.sub(msg, 1, 7) == "/emote ") then
+            emote = string.sub(msg, 8)
+        end
+
+        if (pose == "Standing" and emoteNames[emote] ~= nil) then
+            playAnimation(emote, EMOTE_TRANSITION_TIME, Humanoid)
+        end
+    end)
+
+    script:WaitForChild("PlayEmote").OnInvoke = function(emote: string | Animation)
+        if pose ~= "Standing" then
+            return false, nil
+        end
+
+        if typeof(emote) == "string" and emoteNames[emote] ~= nil then
+            playAnimation(emote, EMOTE_TRANSITION_TIME, Humanoid)
+            return true, currentAnimTrack
+        elseif typeof(emote) == "Instance" and (emote as Instance):IsA("Animation") then
+            playEmote(emote as Animation, EMOTE_TRANSITION_TIME, Humanoid)
+            return true, currentAnimTrack
+        end
+
+        return false, nil
+    end
+
+    if Character.Parent ~= nil then
+        playAnimation("idle", 0.1, Humanoid)
+        pose = "Standing"
+    end
+
+    task.spawn(function()
+        while Character.Parent ~= nil do
+            local _, currentGameTime = task.wait(0.1)
+            stepAnimate(currentGameTime)
+        end
+    end)
+end
+
+function FakeCharacterModule.CreateFakeCharacter()
+    if not LocalPlayer then return end
+
+    RealCharacter = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    OriginalCFrame = RealCharacter.HumanoidRootPart.CFrame
+
+    RealCharacter.Archivable = true
+    FakeCharacter = RealCharacter:Clone()
+
+    local Humanoid = FakeCharacter.Humanoid
+
+    Humanoid.AutomaticScalingEnabled = false
+
+    Humanoid.BodyDepthScale.Value = FakeCharacterModule.Settings.BodyDepthScale
+    Humanoid.BodyHeightScale.Value = FakeCharacterModule.Settings.BodyHeightScale
+    Humanoid.BodyProportionScale.Value = 0
+    Humanoid.BodyWidthScale.Value = FakeCharacterModule.Settings.BodyWidthScale
+    Humanoid.HeadScale.Value = FakeCharacterModule.Settings.HeadScale
+
+    Humanoid.AutomaticScalingEnabled = true
+
+    PlatformPart = Instance.new("Part")
+    PlatformPart.Anchored = true
+    PlatformPart.Size = Vector3.new(200, 1, 200)
+    PlatformPart.CFrame = CFrame.new(0, -500, 0)
+    PlatformPart.CanCollide = true
+    PlatformPart.Parent = workspace
+
+    FakeCharacter.Parent = workspace
+    FakeCharacter.HumanoidRootPart.CFrame = OriginalCFrame
+    FakeCharacter.Name = RealCharacter.Name .. FakeCharacterModule.Settings.FakeCharacterNameSuffix
+
+    for _, v in pairs(FakeCharacter:GetChildren()) do
+        if v:IsA("LocalScript") then
+            v.Disabled = false
+        end
+    end
+
+    for _, v in pairs(FakeCharacter:GetDescendants()) do
+        if v:IsA("BasePart") then
+            v.Transparency = FakeCharacterModule.Settings.Transparency
+        end
+    end
+
+    RealCharacter.HumanoidRootPart.CFrame = PlatformPart.CFrame * CFrame.new(0, 5, 0)
+
+    LocalPlayer.Character = FakeCharacter
+    workspace.CurrentCamera.CameraSubject = FakeCharacter.Humanoid
+    FakeCharacter.Humanoid.WalkSpeed = FakeCharacterModule.Settings.WalkSpeed
+
+    IsInvisible = true
+
+    RunCustomAnimation(FakeCharacter)
+
+    if FakeCharacterModule.Settings.EnableNotifications then
+        StarterGui:SetCore("SendNotification", {
             Title = "Clone Created",
-            Text = "Press X to reset completely",
+            Text = "Press " .. FakeCharacterModule.Settings.ResetKeyCode.Name .. " to reset completely",
             Duration = 5
         })
     end
+end
 
-    local function Reset()
-        local Player = game:GetService("Players").LocalPlayer
-        if FakeCharacter and originalRealCharacter then
-            Player.Character = originalRealCharacter
-            originalRealCharacter.HumanoidRootPart.CFrame = FakeCharacter.HumanoidRootPart.CFrame
+function FakeCharacterModule.ResetFakeCharacter()
+    if IsInvisible and FakeCharacter and RealCharacter then
+        LocalPlayer.Character = RealCharacter
+        RealCharacter.HumanoidRootPart.CFrame = FakeCharacter.HumanoidRootPart.CFrame
 
-            FakeCharacter:Destroy()
+        FakeCharacter:Destroy()
+        if PlatformPart then
             PlatformPart:Destroy()
+        end
 
-            workspace.CurrentCamera.CameraSubject = originalRealCharacter.Humanoid
+        workspace.CurrentCamera.CameraSubject = RealCharacter.Humanoid
+        IsInvisible = false
 
-            FakeCharacter = nil
-            PlatformPart = nil
-            originalRealCharacter = nil
-
-            game:GetService("StarterGui"):SetCore("SendNotification", {
+        if FakeCharacterModule.Settings.EnableNotifications then
+            StarterGui:SetCore("SendNotification", {
                 Title = "Reset Complete",
                 Text = "Character has been restored",
                 Duration = 3
             })
         end
     end
-
-    local function CreateFakeCharacterEntry()
-        Setup()
-
-        local UserInputService = game:GetService("UserInputService")
-        local Player = game:GetService("Players").LocalPlayer
-
-        local currentConnections = {}
-
-        currentConnections.inputBegan = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-            if not gameProcessed and input.KeyCode == Enum.KeyCode.X and FakeCharacter then
-                Reset()
-                if currentConnections.inputBegan then currentConnections.inputBegan:Disconnect(); currentConnections.inputBegan = nil end
-                if currentConnections.characterAdded then currentConnections.characterAdded:Disconnect(); currentConnections.characterAdded = nil end
-            end
-        end)
-
-        currentConnections.characterAdded = Player.CharacterAdded:Connect(function(char)
-            if FakeCharacter then
-                Reset()
-                if currentConnections.inputBegan then currentConnections.inputBegan:Disconnect(); currentConnections.inputBegan = nil end
-                if currentConnections.characterAdded then currentConnections.characterAdded:Disconnect(); currentConnections.characterAdded = nil end
-            end
-        end)
-
-        return FakeCharacter, currentConnections
-    end
-
-    return CreateFakeCharacterEntry
 end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == FakeCharacterModule.Settings.ResetKeyCode and IsInvisible then
+        FakeCharacterModule.ResetFakeCharacter()
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(char: Model)
+    if IsInvisible then
+        if FakeCharacter then FakeCharacter:Destroy() end
+        if PlatformPart then PlatformPart:Destroy() end
+        IsInvisible = false
+    end
+end)
+
+return FakeCharacterModule
